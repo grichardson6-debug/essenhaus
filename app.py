@@ -1,13 +1,16 @@
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import smtplib
-from email.mime.text import MIMEText
-import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 
 # 1. Page Configuration
 st.set_page_config(page_title="Essen Haus & CBI Roster Pro", page_icon="🍺", layout="wide")
+
+# --- CRASH PROTECTION: CHECK FOR SECRETS ---
+if "public_gsheet_url" not in st.secrets:
+    st.error("🚨 **Database Link Missing!**")
+    st.warning("Please go to your Streamlit Cloud Dashboard -> Settings -> Secrets, and add your `public_gsheet_url = '...'`")
+    st.stop()
 
 # --- GLOBAL CONFIGURATION ---
 ROLE_WAGES = {
@@ -22,106 +25,8 @@ ROLE_WAGES = {
 
 CLOCK_TIMES = ["Off", "11:00 AM", "11:30 AM", "12:00 PM", "2:00 PM", "3:30 PM", "4:00 PM", "4:30 PM", "5:00 PM", "5:30 PM", "6:00 PM", "8:00 PM"]
 
-# --- OUTBOUND EMAIL SMTP DETAILS ---
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SENDER_EMAIL = st.secrets.get("sender_email", "your-restaurant-email@gmail.com")
-SENDER_PASSWORD = st.secrets.get("sender_password", "your-gmail-app-password")
-
 # Establish Google Sheets Connection
 conn = st.connection("gsheets", type=GSheetsConnection)
-
-def inject_native_styles():
-    st.markdown("""
-        <style>
-        div.stButton > button {
-            width: 100% !important;
-            white-space: normal !important;
-            word-wrap: break-word !important;
-            padding: 0.6rem 0.2rem !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
-            line-height: 1.3 !important;
-            height: auto !important;
-            min-height: 55px !important;
-            border-radius: 8px !important;
-            transition: all 0.15s ease-in-out !important;
-        }
-        div.stButton > button p { color: #ffffff !important; font-weight: 700 !important; }
-        div.stButton > button:hover { filter: brightness(1.15) !important; transform: translateY(-2px) !important; }
-        
-        .roster-section {
-            background-color: #1e293b;
-            border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 16px;
-            border: 1px solid #334155;
-        }
-        .roster-role-header {
-            font-size: 16px;
-            font-weight: 700;
-            color: #f8fafc;
-            border-bottom: 2px solid #475569;
-            padding-bottom: 6px;
-            margin-bottom: 12px;
-        }
-        .roster-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 6px 0;
-            border-bottom: 1px solid #334155;
-        }
-        .roster-row:last-child {
-            border-bottom: none;
-        }
-        .roster-emp-name {
-            font-size: 14px;
-            color: #3b82f6;
-            font-weight: 500;
-        }
-        .roster-time {
-            font-size: 14px;
-            color: #94a3b8;
-        }
-        .roster-pending-tag {
-            font-size: 12px;
-            color: #f59e0b;
-            font-weight: 600;
-            font-style: italic;
-            margin-left: 6px;
-        }
-        .roster-links a {
-            font-size: 12px;
-            color: #94a3b8 !important;
-            text-decoration: none;
-            margin-left: 8px;
-        }
-        .roster-links a:hover {
-            color: #f8fafc !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-def inject_color_scripts():
-    components.html("""
-    <script>
-    function colorizeButtons() {
-        const buttons = window.parent.document.querySelectorAll('div.stButton > button');
-        buttons.forEach(btn => {
-            const text = btn.innerText;
-            if (text.includes('Server')) { btn.style.backgroundColor = '#10b981'; btn.style.borderColor = '#10b981'; }
-            else if (text.includes('Bartender')) { btn.style.backgroundColor = '#3b82f6'; btn.style.borderColor = '#3b82f6'; }
-            else if (text.includes('Host') || text.includes('Ref')) { btn.style.backgroundColor = '#a855f7'; btn.style.borderColor = '#a855f7'; }
-            else if (text.includes('Expo')) { btn.style.backgroundColor = '#f59e0b'; btn.style.borderColor = '#f59e0b'; }
-            else if (text.includes('Manager')) { btn.style.backgroundColor = '#475569'; btn.style.borderColor = '#475569'; }
-            else if (text.includes('+')) { btn.style.backgroundColor = '#1e293b'; btn.style.borderColor = '#334155'; btn.style.borderStyle = 'dashed'; }
-        });
-    }
-    colorizeButtons();
-    new MutationObserver(colorizeButtons).observe(window.parent.document.body, { childList: true, subtree: true });
-    </script>
-    """, height=0, width=0)
 
 def get_monday_of_week(date_obj):
     return date_obj - timedelta(days=date_obj.weekday())
@@ -153,7 +58,6 @@ def write_sheet_data(worksheet_name, updated_df):
 def init_gsheet_tables():
     u_df, s_df, a_df, t_df, st_df = load_all_sheets_data()
     if u_df.empty:
-        # Automatically seed the roster team from your list
         base_users = [
             {"employee": "Tim", "pin": "4321", "is_manager": 1, "wage": 22.00, "phone": "", "email": "tim@example.com"},
             {"employee": "Grace", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
@@ -202,7 +106,6 @@ if not st.session_state.authenticated:
             st.rerun()
         else: st.sidebar.error("Invalid PIN")
 else:
-    inject_native_styles(); inject_color_scripts()
     st.sidebar.write(f"Logged in: **{st.session_state.user_profile}**")
     if st.sidebar.button("Log Out"): st.session_state.authenticated = False; st.cache_data.clear(); st.rerun()
     
@@ -254,7 +157,6 @@ else:
     # --- SERVER PORTAL ---
     if app_mode == "Server Portal":
         u = st.session_state.user_profile
-        st.title(f"Team Portal: {u}")
         tab1, tab2, tab3 = st.tabs(["Schedule View", "Request Time Off", "Shift Trade Board"])
         
         with tab1:
@@ -287,7 +189,7 @@ else:
                             else: st.markdown("<p style='color:gray; font-size:13px;'>Off</p>", unsafe_allow_html=True)
                 else:
                     view_day = st.selectbox("Select Day to View Floor Map:", days)
-                    st.write(f"### Floor Configuration for {view_day}")
+                    st.write(f"### 📋 Floor Configuration for {view_day}")
                     
                     day_shifts = []
                     for emp in current_db_employees:
@@ -302,43 +204,41 @@ else:
                     
                     col_eh, col_cbi = st.columns(2)
                     
-                    def render_roster_column(venue_name, current_shifts):
-                        st.markdown(f"#### {venue_name}")
+                    def render_roster_column(venue_name, icon, current_shifts):
+                        st.markdown(f"#### {icon} {venue_name}")
                         venue_shifts = [x for x in current_shifts if x["location"] == venue_name]
                         if not venue_shifts:
-                            st.caption(f"No shifts logged for {venue_name}.")
+                            st.caption(f"No floor shifts logged for {venue_name.split(' ')[0]}.")
                             return
                             
-                        roles_present = sorted(list(set([x["role"] for x in venue_shifts])))
-                        for role in roles_present:
-                            role_shifts = [x for x in venue_shifts if x["role"] == role]
+                        # Sort by time, then role
+                        venue_shifts.sort(key=lambda x: CLOCK_TIMES.index(x["time"]) if x["time"] in CLOCK_TIMES else 99)
+                        
+                        for s in venue_shifts:
+                            # Render exact blue info box style from screenshot
+                            st.info(f"**{s['role']}** - {s['emp']} @ {s['time']}")
                             
-                            html_buffer = f"<div class='roster-section'><div class='roster-role-header'>{role} ({len(role_shifts)})</div>"
-                            for s in role_shifts:
-                                pending_text = "<span class='roster-pending-tag'>(Pending Trade)</span>" if s["is_dropped"] else ""
-                                contact_links = ""
-                                if s["emp"] != u:
-                                    if s["phone"]: contact_links += f"<a href='sms:{s['phone']}'>Text</a>"
-                                    if s["email"]: contact_links += f" | <a href='mailto:{s['email']}'>Mail</a>"
-                                else: contact_links += "<span style='font-size:12px; color:#e2e8f0;'>Your Shift</span>"
-                                    
-                                html_buffer += f"""
-                                <div class='roster-row'>
-                                    <div>
-                                        <span class='roster-emp-name'>{s['emp']}</span>
-                                        <span class='roster-time'> {s['time']}</span>
-                                        {pending_text}
-                                    </div>
-                                    <div class='roster-links'>
-                                        {contact_links}
-                                    </div>
-                                </div>
-                                """
-                            html_buffer += "</div>"
-                            st.markdown(html_buffer, unsafe_allow_html=True)
+                            contact_links = []
+                            if s["phone"]: contact_links.append(f"📞 💬 [Text](sms:{s['phone']})")
+                            if s["email"]: contact_links.append(f"📧 [Mail](mailto:{s['email']})")
+                            
+                            if s["emp"] != u:
+                                if contact_links:
+                                    st.markdown(" | ".join(contact_links))
+                            else:
+                                if not s["is_dropped"]:
+                                    if st.button(f"🔴 Drop My Shift: {s['role']} - {s['emp']} @ {s['time']}", key=f"inline_drop_{venue_name}_{s['role']}_{s['emp']}"):
+                                        new_id = str(len(trade_df) + 1)
+                                        new_row = pd.DataFrame([{"id": new_id, "week_start": week_string, "employee": u, "day": view_day, "details": f"[{s['location']}] {s['role']} @ {s['time']}"}])
+                                        trade_df = pd.concat([trade_df, new_row], ignore_index=True)
+                                        write_sheet_data("trade_board", trade_df)
+                                        st.toast("Shift listed on Cloud Board.")
+                                        st.rerun()
+                                else:
+                                    st.warning("Shift drop pending...")
 
-                    with col_eh: render_roster_column("Essen Haus", day_shifts)
-                    with col_cbi: render_roster_column("CBI Side", day_shifts)
+                    with col_eh: render_roster_column("Essen Haus", "🏰", day_shifts)
+                    with col_cbi: render_roster_column("CBI Side", "🌭", day_shifts)
 
         with tab2:
             st.subheader("Submit Availability / Time-Off")
