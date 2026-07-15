@@ -15,6 +15,7 @@ ROLE_WAGES = {
     "Bartender": 8.00,
     "Host": 14.00,
     "Expo": 14.00,
+    "CBI CL Server": 7.00,
     "VB Ref": 80.00,
     "Manager": 22.00
 }
@@ -28,7 +29,6 @@ SENDER_EMAIL = st.secrets.get("sender_email", "your-restaurant-email@gmail.com")
 SENDER_PASSWORD = st.secrets.get("sender_password", "your-gmail-app-password")
 
 # Establish Google Sheets Connection
-# Uses the 'public_gsheet_url' you saved in your Streamlit Advanced Secrets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def inject_native_styles():
@@ -129,7 +129,6 @@ def get_monday_of_week(date_obj):
 # --- GOOGLE SHEETS DATA READ/WRITE LOGIC ---
 @st.cache_data(ttl=10)
 def load_all_sheets_data():
-    """Loads sheet tabs into memory fast."""
     try:
         url = st.secrets["public_gsheet_url"]
         users_df = conn.read(spreadsheet=url, worksheet="users", ttl="10s")
@@ -139,7 +138,6 @@ def load_all_sheets_data():
         status_df = conn.read(spreadsheet=url, worksheet="week_status", ttl="10s")
         return users_df, sched_df, avail_df, trade_df, status_df
     except Exception:
-        # Fallbacks to create fresh DataFrames with correct layouts if sheets are fresh and empty
         u = pd.DataFrame(columns=["employee", "pin", "is_manager", "wage", "phone", "email"])
         s = pd.DataFrame(columns=["week_start", "employee", "day", "role", "type", "hours", "location"])
         a = pd.DataFrame(columns=["employee", "day", "request_type"])
@@ -148,29 +146,36 @@ def load_all_sheets_data():
         return u, s, a, t, st_df
 
 def write_sheet_data(worksheet_name, updated_df):
-    """Pushes fresh memory edits straight up to Google Cloud."""
     url = st.secrets["public_gsheet_url"]
     conn.update(spreadsheet=url, worksheet=worksheet_name, data=updated_df)
     st.cache_data.clear()
 
 def init_gsheet_tables():
-    """Initializes standard profiles (Grace, Gracie, Tim) if the sheet is completely blank."""
     u_df, s_df, a_df, t_df, st_df = load_all_sheets_data()
     if u_df.empty:
+        # Automatically seed the roster team from your list
         base_users = [
-            {"employee": "Grace", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "123-456-7890", "email": "grace@example.com"},
-            {"employee": "Gracie", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "123-456-7891", "email": "gracie@example.com"},
-            {"employee": "Tim", "pin": "4321", "is_manager": 1, "wage": 22.00, "phone": "123-456-7892", "email": "tim@example.com"}
+            {"employee": "Tim", "pin": "4321", "is_manager": 1, "wage": 22.00, "phone": "", "email": "tim@example.com"},
+            {"employee": "Grace", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
+            {"employee": "Gracie", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "", "email": ""},
+            {"employee": "Breleigh Schultz", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
+            {"employee": "Claudio Uriostequi", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
+            {"employee": "Isabella Mino", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
+            {"employee": "Eloise Standifer", "pin": "1234", "is_manager": 0, "wage": 8.00, "phone": "", "email": ""},
+            {"employee": "Seamus Sidney", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "", "email": ""},
+            {"employee": "Bryanna Tesch", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
+            {"employee": "Eddye Toral-Wood", "pin": "1234", "is_manager": 0, "wage": 8.00, "phone": "", "email": ""},
+            {"employee": "Klara Ferjentsik", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "", "email": ""},
+            {"employee": "Alicia Cunningham", "pin": "1234", "is_manager": 0, "wage": 7.00, "phone": "", "email": ""}
         ]
         u_df = pd.DataFrame(base_users)
         write_sheet_data("users", u_df)
 
 init_gsheet_tables()
 
-# Hydrate view states from cloud data
+# Hydrate views
 users_df, sched_df, avail_df, trade_df, status_df = load_all_sheets_data()
 
-# Process User Directory Mapping
 employee_directory = {}
 for _, row in users_df.iterrows():
     employee_directory[str(row["employee"])] = {
@@ -205,14 +210,12 @@ else:
     monday_date = get_monday_of_week(chosen_date)
     week_string = monday_date.strftime("%Y-%m-%d")
     
-    # Process Live Publication State
     week_is_live = False
     if not status_df.empty and "week_start" in status_df.columns:
         match = status_df[status_df["week_start"] == week_string]
         if not match.empty:
             week_is_live = bool(int(match.iloc[0]["published"]))
             
-    # Process Schedule Context Mapping
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     schedule_matrix = {emp: {day: {"role": "None", "type": "Off", "hours": 0.0, "location": "Essen Haus"} for day in days} for emp in current_db_employees}
     
@@ -229,7 +232,6 @@ else:
                     "location": str(r_row["location"]) if pd.notna(r_row["location"]) else "Essen Haus"
                 }
                 
-    # Process Availability Maps
     availability_matrix = {emp: {} for emp in current_db_employees}
     if not avail_df.empty:
         for _, a_row in avail_df.iterrows():
@@ -237,16 +239,12 @@ else:
             if emp_name in availability_matrix:
                 availability_matrix[emp_name][str(a_row["day"])] = str(a_row["request_type"])
                 
-    # Process Trade Pools
     up_for_grabs = []
     if not trade_df.empty:
         filtered_trade = trade_df[trade_df["week_start"] == week_string]
         for _, t_row in filtered_trade.iterrows():
             up_for_grabs.append({
-                "id": str(t_row["id"]),
-                "employee": str(t_row["employee"]),
-                "day": str(t_row["day"]),
-                "details": str(t_row["details"])
+                "id": str(t_row["id"]), "employee": str(t_row["employee"]), "day": str(t_row["day"]), "details": str(t_row["details"])
             })
 
     nav_options = ["Server Portal"]
@@ -279,7 +277,6 @@ else:
                                 st.success(f"**{s['location']}**\n\n{s['role']}\n\nShift: {s['type']}{drop_suffix}")
                                 if not is_dropped:
                                     if st.button("Drop Shift", key=f"p_drop_{d_day}"):
-                                        # Write straight up to cloud trade board
                                         new_id = str(len(trade_df) + 1)
                                         new_row = pd.DataFrame([{"id": new_id, "week_start": week_string, "employee": u, "day": d_day, "details": f"[{s['location']}] {s['role']} @ {s['type']}"}])
                                         trade_df = pd.concat([trade_df, new_row], ignore_index=True)
@@ -352,7 +349,6 @@ else:
             final_status_string = "Permanent Block" if duration_type == "Permanent (Recurring Rule)" else f"Temp: {st.radio('Window:', ['Morning Shift', 'Evening Shift'], horizontal=True)}"
                 
             if st.button("Submit Request", type="primary"):
-                # Clean out existing row if present
                 if not avail_df.empty:
                     avail_df = avail_df[~((avail_df["employee"] == u) & (avail_df["day"] == req_day))]
                 new_avail_row = pd.DataFrame([{"employee": u, "day": req_day, "request_type": final_status_string}])
@@ -369,18 +365,15 @@ else:
                         c_text, c_act = st.columns([4, 1])
                         c_text.write(f"Employee: **{t['employee']}** wishes to drop **{t['day']}** | Context: `{t['details']}`")
                         if c_act.button("Claim Shift", key=f"claim_{t['id']}", type="primary"):
-                            # Filter and swap assignment matches
                             match_idx = sched_df[(sched_df["week_start"] == week_string) & (sched_df["employee"] == t["employee"]) & (sched_df["day"] == t["day"])].index
                             if not match_idx.empty:
                                 orig_row = sched_df.loc[match_idx[0]].copy()
                                 sched_df.loc[match_idx[0], ["role", "type", "hours"]] = ["None", "Off", 0.0]
                                 
-                                # Add or replace row for the claimer
                                 sched_df = sched_df[~((sched_df["week_start"] == week_string) & (sched_df["employee"] == u) & (sched_df["day"] == t["day"]))]
                                 new_shift = pd.DataFrame([{"week_start": week_string, "employee": u, "day": t["day"], "role": orig_row["role"], "type": orig_row["type"], "hours": orig_row["hours"], "location": orig_row["location"]}])
                                 sched_df = pd.concat([sched_df, new_shift], ignore_index=True)
                                 
-                                # Remove dropped request from trade board
                                 trade_df = trade_df[trade_df["id"] != t["id"]]
                                 write_sheet_data("schedule", sched_df)
                                 write_sheet_data("trade_board", trade_df)
@@ -442,18 +435,16 @@ else:
                 st.divider(); st.subheader(f"Shift Editor: {e} on {d}")
                 c1, c2, c3, c4 = st.columns(4)
                 loc_choice = c1.selectbox("Venue Location", ["Essen Haus", "CBI Side"])
-                r = c2.selectbox("Role", ["Server", "Bartender", "Host", "Expo", "Manager"])
+                r = c2.selectbox("Role", ["Server", "Bartender", "Host", "Expo", "CBI CL Server", "Manager"])
                 t = c3.selectbox("Start Time", CLOCK_TIMES)
                 h = c4.number_input("Hours", value=6.0 if t != "Off" else 0.0, step=0.5)
                 
                 col_save, col_close = st.columns([1, 5])
                 if col_save.button("Save Assignment", type="primary"):
-                    # Wipe duplicate keys from sheet frames
                     sched_df = sched_df[~((sched_df["week_start"] == week_string) & (sched_df["employee"] == e) & (sched_df["day"] == d))]
                     new_assign = pd.DataFrame([{"week_start": week_string, "employee": e, "day": d, "role": r if t != "Off" else "None", "type": t, "hours": h, "location": loc_choice}])
                     sched_df = pd.concat([sched_df, new_assign], ignore_index=True)
                     
-                    # Clean out any pending trades associated with edited cells
                     trade_df = trade_df[~((trade_df["week_start"] == week_string) & (trade_df["employee"] == e) & (trade_df["day"] == d))]
                     
                     write_sheet_data("schedule", sched_df)
