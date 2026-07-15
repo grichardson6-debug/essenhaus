@@ -77,7 +77,7 @@ def init_db():
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT OR REPLACE INTO users VALUES ('Grace', '1111', 0, 20.00)")
         cursor.execute("INSERT OR REPLACE INTO users VALUES ('Gracie', '2222', 0, 20.00)")
-        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Nealle', '9999', 1, 25.00)")
+        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Tim', '9999', 1, 25.00)")
         conn.commit()
     conn.close()
 
