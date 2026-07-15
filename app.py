@@ -1,5 +1,7 @@
 import streamlit as st
 import sqlite3
+import smtplib
+from email.mime.text import MIMEText
 import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 
@@ -8,7 +10,7 @@ st.set_page_config(page_title="Essen Haus & CBI Roster Pro", page_icon="🍺", l
 
 DB_FILE = "scheduler.db"
 
-# --- GLOBAL MATRICES YOU MIGHT EDIT ON THE FLY ---
+# --- GLOBAL CONFIGURATION (Edit on the fly) ---
 ROLE_WAGES = {
     "Server": 6.00,
     "Bartender": 8.00,
@@ -19,6 +21,13 @@ ROLE_WAGES = {
 }
 
 CLOCK_TIMES = ["Off", "11:00 AM", "11:30 AM", "12:00 PM", "2:00 PM", "3:30 PM", "4:00 PM", "4:30 PM", "5:00 PM", "5:30 PM", "6:00 PM", "8:00 PM"]
+
+# --- OUTBOUND EMAIL SMTP DETAILS ---
+# Note: You can store these credentials safely in Streamlit Secrets on your Cloud app!
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = st.secrets.get("sender_email", "your-restaurant-email@gmail.com")
+SENDER_PASSWORD = st.secrets.get("sender_password", "your-gmail-app-password")
 
 def inject_native_styles():
     st.markdown("""
@@ -69,23 +78,33 @@ def init_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS schedule (week_start TEXT, employee TEXT, day TEXT, role TEXT, type TEXT, hours REAL, location TEXT DEFAULT "Essen Haus", PRIMARY KEY (week_start, employee, day))')
     cursor.execute('CREATE TABLE IF NOT EXISTS availability (employee TEXT, day TEXT, request_type TEXT, PRIMARY KEY (employee, day))')
     cursor.execute('CREATE TABLE IF NOT EXISTS trade_board (id INTEGER PRIMARY KEY AUTOINCREMENT, week_start TEXT, employee TEXT, day TEXT, details TEXT)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS users (employee TEXT PRIMARY KEY, pin TEXT, is_manager INTEGER DEFAULT 0, wage REAL DEFAULT 20.00)')
     cursor.execute('CREATE TABLE IF NOT EXISTS week_status (week_start TEXT PRIMARY KEY, published INTEGER DEFAULT 0)')
+    
+    # Rebuild user schema to include phone and email columns
+    cursor.execute('CREATE TABLE IF NOT EXISTS users (employee TEXT PRIMARY KEY, pin TEXT, is_manager INTEGER DEFAULT 0, wage REAL DEFAULT 20.00, phone TEXT DEFAULT "", email TEXT DEFAULT "")')
+    
+    # Auto-migration if updating an existing local database
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
     conn.commit()
     
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Grace', '1111', 0, 20.00)")
-        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Gracie', '2222', 0, 20.00)")
-        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Tim', '9999', 1, 25.00)")
+        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Grace', '1111', 0, 20.00, '608-555-0111', 'grace@test.com')")
+        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Gracie', '2222', 0, 20.00, '608-555-0222', 'gracie@test.com')")
+        cursor.execute("INSERT OR REPLACE INTO users VALUES ('Tim', '9999', 1, 25.00, '608-555-0999', 'tim@test.com')")
         conn.commit()
     conn.close()
 
 def get_all_employees_with_wages():
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
-    cursor.execute("SELECT employee, wage, is_manager FROM users")
+    cursor.execute("SELECT employee, wage, is_manager, phone, email FROM users")
     rows = cursor.fetchall(); conn.close()
-    return {r[0]: {"wage": r[1], "is_manager": bool(r[2])} for r in rows}
+    return {r[0]: {"wage": r[1], "is_manager": bool(r[2]), "phone": r[3] or "", "email": r[4] or ""} for r in rows}
 
 def is_week_published(week_str):
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
@@ -118,6 +137,61 @@ def load_week_data(week_str, employees_list):
     trade_list = [{"id": r[0], "employee": r[1], "day": r[2], "details": r[3]} for r in cursor.fetchall()]
     conn.close()
     return schedule_dict, avail_dict, trade_list
+
+# --- MASS EMAIL NOTIFICATION NOTIFIER ---
+def email_out_weekly_schedule(week_str, schedule_data, employee_meta):
+    """Sends personalized shift listings to each active employee once published."""
+    if not SENDER_EMAIL or SENDER_PASSWORD == "your-gmail-app-password":
+        st.warning("⚠️ SMTP email account credentials not configured. Outbound emails skipped.")
+        return
+        
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    success_count = 0
+    
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        
+        for emp, shifts in schedule_data.items():
+            email_addr = employee_meta.get(emp, {}).get("email")
+            if not email_addr or "@" not in email_addr:
+                continue # Skip if no valid email is configured for this teammate
+                
+            # Draft individual agenda
+            shift_list_text = ""
+            total_hours = 0.0
+            for d in days:
+                s = shifts[d]
+                if s["type"] != "Off":
+                    shift_list_text += f"- {d}: {s['location']} - {s['role']} @ {s['type']} ({s['hours']} hrs)\n"
+                    total_hours += s["hours"]
+                else:
+                    shift_list_text += f"- {d}: Off\n"
+            
+            body = (
+                f"Hey {emp},\n\n"
+                f"Your weekly schedule has just been published for the week of {week_str}!\n\n"
+                f"--- YOUR SCHEDULE ---\n"
+                f"{shift_list_text}\n"
+                f"Total Scheduled Hours: {total_hours} hrs\n\n"
+                f"Need to drop a shift? Log directly into the team app to submit a trade board request.\n\n"
+                f"Best,\n"
+                f"Management Team"
+            )
+            
+            msg = MIMEText(body)
+            msg["Subject"] = f"📅 New Schedule Published - Week of {week_str}"
+            msg["From"] = SENDER_EMAIL
+            msg["To"] = email_addr
+            
+            server.sendmail(SENDER_EMAIL, email_addr, msg.as_string())
+            success_count += 1
+            
+        server.quit()
+        st.success(f"📧 Weekly schedule notifications successfully sent to {success_count} employees!")
+    except Exception as e:
+        st.error(f"❌ Failed to dispatch schedule emails: {e}")
 
 @st.dialog("🔄 Confirm Shift Drop")
 def confirm_drop_dialog(week_string, employee, day, role, shift_time, location):
@@ -174,14 +248,13 @@ else:
     # --- SERVER PORTAL ---
     if app_mode == "Server Portal":
         u = st.session_state.user_profile
-        st.title(f"Team Portal: {u}")
+        st.title(f"💁 Team Portal: {u}")
         tab1, tab2, tab3 = st.tabs(["📅 Schedule View", "🏖️ Request Time Off", "🔄 Shift Trade Board"])
         
         with tab1:
             if not week_is_live and not st.session_state.is_manager:
                 st.info("🚧 The manager hasn't published this schedule yet.")
             else:
-                # --- NEW VIEW MODE FILTER TOGGLE ---
                 view_mode = st.radio("Display Filter:", ["Show Full Team Floor Plan", "Show Just My Personal Schedule"], horizontal=True)
                 
                 if view_mode == "Show Just My Personal Schedule":
@@ -201,7 +274,6 @@ else:
                                 st.markdown("<p style='color:gray; font-size:13px;'>🟢 Off</p>", unsafe_allow_html=True)
                 
                 else:
-                    # Original Master Floor Plan View
                     view_day = st.selectbox("Select Day to View Floor Map:", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
                     st.write(f"### 📋 Floor Configuration for {view_day}")
                     
@@ -210,7 +282,14 @@ else:
                     for emp in current_db_employees:
                         s = st.session_state.schedule[emp][view_day]
                         if s["type"] != "Off":
-                            shift_data = {"emp": emp, "role": s["role"], "time": s["type"]}
+                            meta = employee_directory.get(emp, {})
+                            shift_data = {
+                                "emp": emp, 
+                                "role": s["role"], 
+                                "time": s["type"],
+                                "phone": meta.get("phone", ""),
+                                "email": meta.get("email", "")
+                            }
                             if s["location"] == "Essen Haus": eh_shifts.append(shift_data)
                             else: cbi_shifts.append(shift_data)
                     
@@ -223,22 +302,43 @@ else:
                         st.markdown("#### 🏰 Essen Haus Floor Plan")
                         if eh_shifts:
                             for s in eh_shifts:
+                                # Render clickable communication shortcuts inside the cards
+                                contact_html = ""
+                                if s['phone']:
+                                    contact_html += f" <a href='sms:{s['phone']}' style='text-decoration:none;'>💬 Text</a>"
+                                if s['email']:
+                                    contact_html += f" | <a href='mailto:{s['email']}' style='text-decoration:none;'>📧 Mail</a>"
+                                
                                 card_label = f"**{s['role']}** - {s['emp']} @ {s['time']}"
+                                
                                 if s['emp'] == u:
                                     if st.button(f"🔴 Drop My Shift: {card_label}", key=f"drop_eh_{s['emp']}"):
                                         confirm_drop_dialog(week_string, u, view_day, s['role'], s['time'], "Essen Haus")
-                                else: st.info(card_label)
+                                else:
+                                    st.info(card_label)
+                                    if contact_html:
+                                        st.markdown(f"<p style='margin-top:-12px; margin-left:10px; font-size:12px;'>📞{contact_html}</p>", unsafe_allow_html=True)
                         else: st.caption("No floor shifts logged for Essen Haus.")
                         
                     with col_cbi:
                         st.markdown("#### 🌭 Come Back In (CBI) Side")
                         if cbi_shifts:
                             for s in cbi_shifts:
+                                contact_html = ""
+                                if s['phone']:
+                                    contact_html += f" <a href='sms:{s['phone']}' style='text-decoration:none;'>💬 Text</a>"
+                                if s['email']:
+                                    contact_html += f" | <a href='mailto:{s['email']}' style='text-decoration:none;'>📧 Mail</a>"
+                                
                                 card_label = f"**{s['role']}** - {s['emp']} @ {s['time']}"
+                                
                                 if s['emp'] == u:
                                     if st.button(f"🔴 Drop My Shift: {card_label}", key=f"drop_cbi_{s['emp']}"):
                                         confirm_drop_dialog(week_string, u, view_day, s['role'], s['time'], "CBI Side")
-                                else: st.info(card_label)
+                                else:
+                                    st.info(card_label)
+                                    if contact_html:
+                                        st.markdown(f"<p style='margin-top:-12px; margin-left:10px; font-size:12px;'>📞{contact_html}</p>", unsafe_allow_html=True)
                         else: st.caption("No floor shifts logged for CBI.")
 
         with tab2:
@@ -283,7 +383,11 @@ else:
                 if tool_c3.button("Unpublish Schedule"): set_week_publication(week_string, 0); st.rerun()
             else:
                 tool_c2.markdown("<h3 style='color:#f59e0b; margin:0;'>📝 Draft Mode</h3>", unsafe_allow_html=True)
-                if tool_c3.button("Publish Schedule to Team", type="primary"): set_week_publication(week_string, 1); st.rerun()
+                if tool_c3.button("🚀 Publish Schedule to Team", type="primary"):
+                    set_week_publication(week_string, 1)
+                    # Trigger bulk schedule delivery engine
+                    email_out_weekly_schedule(week_string, st.session_state.schedule, employee_directory)
+                    st.rerun()
             
             st.divider()
             header_cols = st.columns([2.2] + [1.4] * 7 + [1.6])
@@ -333,13 +437,15 @@ else:
                 if col_close.button("Cancel"): del st.session_state.sel; st.rerun()
 
         with m_tab2:
-            st.subheader("Hire Team Member")
+            st.subheader("Staff Directory")
             with st.form("new_emp"):
                 n = st.text_input("Name")
                 p = st.text_input("4-Digit PIN", max_chars=4)
+                ph = st.text_input("Phone Number")
+                em = st.text_input("Email Address")
                 m = st.checkbox("Grant Manager Privileges?")
                 if st.form_submit_button("Hire Team Member"):
                     if n and p:
                         conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
-                        cur.execute("INSERT INTO users VALUES (?,?,?,20.00)", (n, p, 1 if m else 0))
+                        cur.execute("INSERT INTO users VALUES (?,?,?,20.00,?,?)", (n, p, 1 if m else 0, ph, em))
                         conn.commit(); conn.close(); st.success("Hired!"); st.rerun()
