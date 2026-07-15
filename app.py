@@ -31,7 +31,6 @@ SENDER_PASSWORD = st.secrets.get("sender_password", "your-gmail-app-password")
 def inject_native_styles():
     st.markdown("""
         <style>
-        /* Main Matrix Button Styles */
         div.stButton > button {
             width: 100% !important;
             white-space: normal !important;
@@ -48,7 +47,6 @@ def inject_native_styles():
         div.stButton > button p { color: #ffffff !important; font-weight: 700 !important; }
         div.stButton > button:hover { filter: brightness(1.15) !important; transform: translateY(-2px) !important; }
         
-        /* Roster Card Styling */
         .roster-section {
             background-color: #1e293b;
             border-radius: 8px;
@@ -132,38 +130,46 @@ def init_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS trade_board (id INTEGER PRIMARY KEY AUTOINCREMENT, week_start TEXT, employee TEXT, day TEXT, details TEXT)')
     cursor.execute('CREATE TABLE IF NOT EXISTS week_status (week_start TEXT PRIMARY KEY, published INTEGER DEFAULT 0)')
     cursor.execute('CREATE TABLE IF NOT EXISTS users (employee TEXT PRIMARY KEY, pin TEXT, is_manager INTEGER DEFAULT 0, wage REAL DEFAULT 20.00, phone TEXT DEFAULT "", email TEXT DEFAULT "")')
+    
+    # Pre-seed initial employees if table is empty
+    cursor.execute("SELECT COUNT(*) FROM users")
+    if cursor.fetchone()[0] == 0:
+        # Inserting default employees. Standard users have 1234, Tim (Manager) has 4321
+        cursor.execute("INSERT INTO users VALUES (?,?,?,?,?,?)", ("Grace", "1234", 0, 6.00, "123-456-7890", "grace@example.com"))
+        cursor.execute("INSERT INTO users VALUES (?,?,?,?,?,?)", ("Gracie", "1234", 0, 14.00, "123-456-7891", "gracie@example.com"))
+        cursor.execute("INSERT INTO users VALUES (?,?,?,?,?,?)", ("Tim", "4321", 1, 22.00, "123-456-7892", "tim@example.com"))
+    
     conn.commit(); conn.close()
 
+# --- CACHED READS FOR HIGH PERFORMANCE ---
+@st.cache_data(ttl=60)
 def get_all_employees_with_wages():
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
     cursor.execute("SELECT employee, wage, is_manager, phone, email FROM users")
     rows = cursor.fetchall(); conn.close()
     return {r[0]: {"wage": r[1], "is_manager": bool(r[2]), "phone": r[3] or "", "email": r[4] or ""} for r in rows}
 
+@st.cache_data(ttl=10)
 def is_week_published(week_str):
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
     cursor.execute("SELECT published FROM week_status WHERE week_start=?", (week_str,))
     res = cursor.fetchone(); conn.close()
     return bool(res[0]) if res else False
 
-def set_week_publication(week_str, status_int):
-    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO week_status VALUES (?, ?)", (week_str, status_int))
-    conn.commit(); conn.close()
-
-def load_week_data(week_str, employees_list):
+@st.cache_data(ttl=5)
+def load_week_data(week_str, employees_list_tuple):
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     cursor.execute("SELECT employee, day, role, type, hours, location FROM schedule WHERE week_start=?", (week_str,))
     rows = cursor.fetchall()
     
-    schedule_dict = {emp: {day: {"role": "None", "type": "Off", "hours": 0.0, "location": "Essen Haus"} for day in days} for emp in employees_list}
+    schedule_dict = {emp: {day: {"role": "None", "type": "Off", "hours": 0.0, "location": "Essen Haus"} for day in days} for emp in employees_list_tuple}
     for emp, day, role, shift_time, hours, loc in rows:
         if emp in schedule_dict and day in schedule_dict[emp]:
             schedule_dict[emp][day] = {"role": role, "type": shift_time, "hours": hours, "location": loc or "Essen Haus"}
             
     cursor.execute("SELECT employee, day, request_type FROM availability")
-    avail_dict = {emp: {} for emp in employees_list}
+    avail_dict = {emp: {} for emp in employees_list_tuple}
     for emp, day, req in cursor.fetchall():
         if emp in avail_dict: avail_dict[emp][day] = req
             
@@ -171,6 +177,15 @@ def load_week_data(week_str, employees_list):
     trade_list = [{"id": r[0], "employee": r[1], "day": r[2], "details": r[3]} for r in cursor.fetchall()]
     conn.close()
     return schedule_dict, avail_dict, trade_list
+
+def clear_app_caches():
+    st.cache_data.clear()
+
+def set_week_publication(week_str, status_int):
+    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO week_status VALUES (?, ?)", (week_str, status_int))
+    conn.commit(); conn.close()
+    clear_app_caches()
 
 def email_out_weekly_schedule(week_str, schedule_data, employee_meta):
     if not SENDER_EMAIL or SENDER_PASSWORD == "your-gmail-app-password":
@@ -210,9 +225,12 @@ def confirm_drop_dialog(week_string, employee, day, role, shift_time, location):
             cursor.execute("INSERT INTO trade_board (week_start, employee, day, details) VALUES (?,?,?,?)", (week_string, employee, day, f"[{location}] {role} @ {shift_time}"))
             conn.commit()
             st.toast("Shift successfully listed on Trade Board.")
-        conn.close(); st.rerun()
+        conn.close()
+        clear_app_caches()
+        st.rerun()
     if c2.button("Cancel", use_container_width=True): st.rerun()
 
+# Run database setup & make sure our core team is registered
 init_db()
 
 st.sidebar.title("Security Access")
@@ -221,6 +239,7 @@ if "authenticated" not in st.session_state:
 
 employee_directory = get_all_employees_with_wages()
 current_db_employees = list(employee_directory.keys())
+current_db_employees_tuple = tuple(current_db_employees)
 
 if not st.session_state.authenticated:
     login_user = st.sidebar.selectbox("Select Your Profile:", current_db_employees)
@@ -231,17 +250,19 @@ if not st.session_state.authenticated:
         res = cursor.fetchone(); conn.close()
         if res:
             st.session_state.authenticated, st.session_state.user_profile, st.session_state.is_manager = True, login_user, bool(res[0])
+            clear_app_caches()
             st.rerun()
         else: st.sidebar.error("Invalid PIN")
 else:
     inject_native_styles(); inject_color_scripts()
     st.sidebar.write(f"Logged in: **{st.session_state.user_profile}**")
-    if st.sidebar.button("Log Out"): st.session_state.authenticated = False; st.rerun()
+    if st.sidebar.button("Log Out"): st.session_state.authenticated = False; clear_app_caches(); st.rerun()
     
     chosen_date = st.sidebar.date_input("Calendar Week:", datetime.today())
     monday_date = get_monday_of_week(chosen_date)
     week_string = monday_date.strftime("%Y-%m-%d")
-    st.session_state.schedule, st.session_state.availability_db, st.session_state.up_for_grabs = load_week_data(week_string, current_db_employees)
+    
+    st.session_state.schedule, st.session_state.availability_db, st.session_state.up_for_grabs = load_week_data(week_string, current_db_employees_tuple)
     week_is_live = is_week_published(week_string)
     
     nav_options = ["Server Portal"]
@@ -282,7 +303,6 @@ else:
                     view_day = st.selectbox("Select Day to View Floor Map:", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
                     st.write(f"### Floor Configuration for {view_day}")
                     
-                    # Extract active shifts for this day
                     day_shifts = []
                     for emp in current_db_employees:
                         s = st.session_state.schedule[emp][view_day]
@@ -301,7 +321,6 @@ else:
                     
                     col_eh, col_cbi = st.columns(2)
                     
-                    # Unified clean function to group by role and output clear UI boxes
                     def render_roster_column(venue_name, current_shifts):
                         st.markdown(f"#### {venue_name}")
                         venue_shifts = [x for x in current_shifts if x["location"] == venue_name]
@@ -310,7 +329,6 @@ else:
                             st.caption(f"No floor shifts logged for {venue_name}.")
                             return
                             
-                        # Group by active unique roles
                         roles_present = sorted(list(set([x["role"] for x in venue_shifts])))
                         for role in roles_present:
                             role_shifts = [x for x in venue_shifts if x["role"] == role]
@@ -342,7 +360,6 @@ else:
                             html_buffer += "</div>"
                             st.markdown(html_buffer, unsafe_allow_html=True)
                             
-                            # Give current user a clean inline drop utility button if they own a shift here
                             for s in role_shifts:
                                 if s["emp"] == u and not s["is_dropped"]:
                                     if st.button(f"Request Drop for My {role} Shift", key=f"inline_drop_{venue_name}_{role}"):
@@ -370,7 +387,9 @@ else:
             if st.button("Submit Time-Off Request", type="primary"):
                 conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
                 cursor.execute("INSERT OR REPLACE INTO availability VALUES (?, ?, ?)", (u, req_day, final_status_string))
-                conn.commit(); conn.close(); st.success("Availability updated successfully!"); st.rerun()
+                conn.commit(); conn.close()
+                clear_app_caches()
+                st.success("Availability updated successfully!"); st.rerun()
 
         with tab3:
             st.subheader("Available Trades Pool")
@@ -390,7 +409,9 @@ else:
                                 cursor.execute("INSERT OR REPLACE INTO schedule VALUES (?,?,?,?,?,?,?)", (week_string, t["employee"], t["day"], "None", "Off", 0.0, "Essen Haus"))
                                 cursor.execute("DELETE FROM trade_board WHERE id=?", (t["id"],))
                                 conn.commit()
-                            conn.close(); st.success("Shift claimed!"); st.rerun()
+                            conn.close()
+                            clear_app_caches()
+                            st.success("Shift claimed!"); st.rerun()
             else: st.caption("No shifts on the board.")
 
     # --- MANAGER HUB ---
@@ -452,7 +473,9 @@ else:
                     conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
                     cur.execute("INSERT OR REPLACE INTO schedule VALUES (?,?,?,?,?,?,?)", (week_string, e, d, r if t != "Off" else "None", t, h, loc_choice))
                     cur.execute("DELETE FROM trade_board WHERE week_start=? AND employee=? AND day=?", (week_string, e, d))
-                    conn.commit(); cur.close(); del st.session_state.sel; st.rerun()
+                    conn.commit(); cur.close()
+                    clear_app_caches()
+                    del st.session_state.sel; st.rerun()
                 if col_close.button("Cancel"): del st.session_state.sel; st.rerun()
 
         with m_tab2:
@@ -467,4 +490,6 @@ else:
                     if n and p:
                         conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
                         cur.execute("INSERT INTO users VALUES (?,?,?,20.00,?,?)", (n, p, 1 if m else 0, ph, em))
-                        conn.commit(); conn.close(); st.success("Employee hired successfully."); st.rerun()
+                        conn.commit(); conn.close()
+                        clear_app_caches()
+                        st.success("Employee hired successfully."); st.rerun()
