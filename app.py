@@ -71,10 +71,17 @@ init_gsheet_tables()
 # Hydrate views
 users_df, sched_df, avail_df, trade_df, status_df = load_all_sheets_data()
 
+def normalize_pin(raw_pin):
+    if pd.isna(raw_pin):
+        return ""
+    if isinstance(raw_pin, float):
+        return str(int(raw_pin))
+    return str(raw_pin).strip()
+
 employee_directory = {}
 for _, row in users_df.iterrows():
     employee_directory[str(row["employee"])] = {
-        "pin": str(row["pin"]),
+        "pin": normalize_pin(row["pin"]),
         "is_manager": bool(int(row["is_manager"])),
         "wage": float(row["wage"]),
         "phone": str(row["phone"]) if pd.notna(row["phone"]) else "",
@@ -91,7 +98,7 @@ if not st.session_state.authenticated:
     login_pin = st.sidebar.text_input("Enter PIN:", type="password")
     if st.sidebar.button("Log In", type="primary"):
         meta = employee_directory.get(login_user, {})
-        if meta and meta["pin"] == login_pin:
+        if meta and meta["pin"] == login_pin.strip():
             st.session_state.authenticated, st.session_state.user_profile, st.session_state.is_manager = True, login_user, meta["is_manager"]
             st.cache_data.clear()
             st.rerun()
