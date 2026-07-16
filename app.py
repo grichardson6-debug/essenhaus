@@ -251,43 +251,43 @@ if not avail_df.empty:
                     with col_cbi: render_roster_column("CBI Side", "🌭", day_shifts)
 
         with tab2:
-    st.subheader("Submit Availability / Time-Off")
-    duration_type = st.radio("Duration Style:", ["Permanent (Recurring Rule)", "Temporary (Single Date)"], horizontal=True)
-
-    if duration_type == "Permanent (Recurring Rule)":
-        st.write("Select the day(s) you're permanently unavailable:")
-        checked_days = []
-        cols = st.columns(7)
-        for i, d in enumerate(days):
-            if cols[i].checkbox(d[:3], key=f"perm_{d}"):
-                checked_days.append(d)
-
-        if st.button("Submit Request", type="primary"):
-            if not checked_days:
-                st.warning("Select at least one day.")
+            st.subheader("Submit Availability / Time-Off")
+            duration_type = st.radio("Duration Style:", ["Permanent (Recurring Rule)", "Temporary (Single Date)"], horizontal=True)
+    
+            if duration_type == "Permanent (Recurring Rule)":
+                st.write("Select the day(s) you're permanently unavailable:")
+                checked_days = []
+                cols = st.columns(7)
+                for i, d in enumerate(days):
+                    if cols[i].checkbox(d[:3], key=f"perm_{d}"):
+                        checked_days.append(d)
+    
+                if st.button("Submit Request", type="primary"):
+                    if not checked_days:
+                        st.warning("Select at least one day.")
+                    else:
+                        for d in checked_days:
+                            if not avail_df.empty:
+                                avail_df = avail_df[~((avail_df["employee"] == u) & (avail_df["day"] == d) & (avail_df["specific_date"] == ""))]
+                            new_row = pd.DataFrame([{"employee": u, "day": d, "request_type": "Permanent Block", "specific_date": ""}])
+                            avail_df = pd.concat([avail_df, new_row], ignore_index=True)
+                        write_sheet_data("availability", avail_df)
+                        st.success("Cloud availability saved!"); st.rerun()
+    
             else:
-                for d in checked_days:
+                req_date = st.date_input("Select the specific date:", datetime.today())
+                window = st.radio("Window:", ["Morning Shift", "Evening Shift", "Full Day"], horizontal=True)
+                req_day = req_date.strftime("%A")
+                st.caption(f"This falls on a **{req_day}**.")
+    
+                if st.button("Submit Request", type="primary"):
+                    date_str = req_date.strftime("%Y-%m-%d")
                     if not avail_df.empty:
-                        avail_df = avail_df[~((avail_df["employee"] == u) & (avail_df["day"] == d) & (avail_df["specific_date"] == ""))]
-                    new_row = pd.DataFrame([{"employee": u, "day": d, "request_type": "Permanent Block", "specific_date": ""}])
+                        avail_df = avail_df[~((avail_df["employee"] == u) & (avail_df["specific_date"] == date_str))]
+                    new_row = pd.DataFrame([{"employee": u, "day": req_day, "request_type": f"Temp: {window}", "specific_date": date_str}])
                     avail_df = pd.concat([avail_df, new_row], ignore_index=True)
-                write_sheet_data("availability", avail_df)
-                st.success("Cloud availability saved!"); st.rerun()
-
-    else:
-        req_date = st.date_input("Select the specific date:", datetime.today())
-        window = st.radio("Window:", ["Morning Shift", "Evening Shift", "Full Day"], horizontal=True)
-        req_day = req_date.strftime("%A")
-        st.caption(f"This falls on a **{req_day}**.")
-
-        if st.button("Submit Request", type="primary"):
-            date_str = req_date.strftime("%Y-%m-%d")
-            if not avail_df.empty:
-                avail_df = avail_df[~((avail_df["employee"] == u) & (avail_df["specific_date"] == date_str))]
-            new_row = pd.DataFrame([{"employee": u, "day": req_day, "request_type": f"Temp: {window}", "specific_date": date_str}])
-            avail_df = pd.concat([avail_df, new_row], ignore_index=True)
-            write_sheet_data("availability", avail_df)
-            st.success("Cloud availability saved!"); st.rerun()
+                    write_sheet_data("availability", avail_df)
+                    st.success("Cloud availability saved!"); st.rerun()
 
         with tab3:
             st.subheader("Available Trades Pool")
