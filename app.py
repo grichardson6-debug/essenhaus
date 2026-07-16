@@ -61,16 +61,7 @@ def init_gsheet_tables():
         base_users = [
             {"employee": "Tim", "pin": "4321", "is_manager": 1, "wage": 22.00, "phone": "", "email": "tim@example.com"},
             {"employee": "Grace", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
-            {"employee": "Gracie", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "", "email": ""},
-            {"employee": "Breleigh Schultz", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
-            {"employee": "Claudio Uriostequi", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
-            {"employee": "Isabella Mino", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
-            {"employee": "Eloise Standifer", "pin": "1234", "is_manager": 0, "wage": 8.00, "phone": "", "email": ""},
-            {"employee": "Seamus Sidney", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "", "email": ""},
-            {"employee": "Bryanna Tesch", "pin": "1234", "is_manager": 0, "wage": 6.00, "phone": "", "email": ""},
-            {"employee": "Eddye Toral-Wood", "pin": "1234", "is_manager": 0, "wage": 8.00, "phone": "", "email": ""},
-            {"employee": "Klara Ferjentsik", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "", "email": ""},
-            {"employee": "Alicia Cunningham", "pin": "1234", "is_manager": 0, "wage": 7.00, "phone": "", "email": ""}
+            {"employee": "Gracie", "pin": "1234", "is_manager": 0, "wage": 14.00, "phone": "", "email": ""}
         ]
         u_df = pd.DataFrame(base_users)
         write_sheet_data("users", u_df)
