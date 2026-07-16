@@ -134,23 +134,23 @@ else:
                 }
                 
     availability_matrix = {emp: {} for emp in current_db_employees}
-if not avail_df.empty:
-    week_end_date = monday_date + timedelta(days=6)
-    for _, a_row in avail_df.iterrows():
-        emp_name = str(a_row["employee"])
-        if emp_name not in availability_matrix:
-            continue
-        req_type = str(a_row["request_type"])
-        specific_date_str = str(a_row.get("specific_date", "")).strip()
-        if specific_date_str and specific_date_str.lower() != "nan":
-            try:
-                req_date = datetime.strptime(specific_date_str, "%Y-%m-%d").date()
-            except ValueError:
+    if not avail_df.empty:
+        week_end_date = monday_date + timedelta(days=6)
+        for _, a_row in avail_df.iterrows():
+            emp_name = str(a_row["employee"])
+            if emp_name not in availability_matrix:
                 continue
-            if monday_date <= req_date <= week_end_date:
+            req_type = str(a_row["request_type"])
+            specific_date_str = str(a_row.get("specific_date", "")).strip()
+            if specific_date_str and specific_date_str.lower() != "nan":
+                try:
+                    req_date = datetime.strptime(specific_date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if monday_date <= req_date <= week_end_date:
+                    availability_matrix[emp_name][str(a_row["day"])] = req_type
+            else:
                 availability_matrix[emp_name][str(a_row["day"])] = req_type
-        else:
-            availability_matrix[emp_name][str(a_row["day"])] = req_type
                 
     up_for_grabs = []
     if not trade_df.empty:
