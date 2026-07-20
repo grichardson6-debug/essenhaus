@@ -3,6 +3,8 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 import os
+import smtplib
+from email.message import EmailMessage
 
 # 1. Page Configuration
 st.set_page_config(page_title="Essen Haus & CBI Roster Pro", page_icon="🍺", layout="wide")
@@ -84,6 +86,29 @@ def init_db():
             published INTEGER
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee TEXT,
+            timestamp TEXT,
+            message TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS trade_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT,
+            employee TEXT,
+            timestamp TEXT,
+            comment TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     conn.commit()
 
     # Seed base users only if table is empty
@@ -111,7 +136,8 @@ def read_table(table_name):
 
 
 def load_all_data():
-    return read_table("users"), read_table("schedule"), read_table("availability"), read_table("trade_board"), read_table("week_status")
+    return (read_table("users"), read_table("schedule"), read_table("availability"), read_table("trade_board"),
+            read_table("week_status"), read_table("messages"), read_table("trade_comments"))
 
 
 def upsert_schedule_row(week_start, employee, day, role, type_, hours, location):
@@ -158,6 +184,7 @@ def remove_trade_row(trade_id):
     conn = get_conn()
     c = conn.cursor()
     c.execute("DELETE FROM trade_board WHERE id=?", (trade_id,))
+    c.execute("DELETE FROM trade_comments WHERE trade_id=?", (trade_id,))
     conn.commit()
     conn.close()
 
@@ -180,8 +207,95 @@ def add_new_employee(name, pin, is_manager, wage, phone, email):
     conn.close()
 
 
+def add_message(employee, message):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO messages (employee, timestamp, message) VALUES (?, ?, ?)",
+              (employee, datetime.now().strftime("%Y-%m-%d %I:%M %p"), message))
+    conn.commit()
+    conn.close()
+
+
+def add_trade_comment(trade_id, employee, comment):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO trade_comments (trade_id, employee, timestamp, comment) VALUES (?, ?, ?, ?)",
+              (trade_id, employee, datetime.now().strftime("%Y-%m-%d %I:%M %p"), comment))
+    conn.commit()
+    conn.close()
+
+
+def get_settings():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT key, value FROM settings")
+    rows = c.fetchall()
+    conn.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def save_setting(key, value):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+
+def send_schedule_emails(week_string, schedule_matrix, employee_directory):
+    settings = get_settings()
+    server = settings.get("smtp_server", "").strip()
+    port = settings.get("smtp_port", "").strip()
+    user = settings.get("smtp_user", "").strip()
+    password = settings.get("smtp_password", "")
+    from_name = settings.get("from_name", "Essen Haus Scheduling").strip() or "Essen Haus Scheduling"
+
+    if not (server and port and user and password):
+        return 0, ["Email settings are not configured. Go to Manager Hub > Email Settings."]
+
+    try:
+        smtp_conn = smtplib.SMTP(server, int(port), timeout=15)
+        smtp_conn.starttls()
+        smtp_conn.login(user, password)
+    except Exception as e:
+        return 0, [f"Could not connect to email server: {e}"]
+
+    sent = 0
+    failed = []
+    for emp, meta in employee_directory.items():
+        to_email = meta.get("email", "").strip()
+        if not to_email:
+            continue
+
+        lines = [f"Hi {emp}, your schedule for the week of {week_string} is now live:", ""]
+        has_shift = False
+        for d in days:
+            s = schedule_matrix.get(emp, {}).get(d)
+            if s and s["type"] != "Off":
+                has_shift = True
+                lines.append(f"  {d}: {s['role']} @ {s['type']} ({s['location']})")
+        if not has_shift:
+            lines.append("  You are not scheduled to work this week.")
+        body = "\n".join(lines)
+
+        msg = EmailMessage()
+        msg["Subject"] = f"Your Schedule: Week of {week_string}"
+        msg["From"] = f"{from_name} <{user}>"
+        msg["To"] = to_email
+        msg.set_content(body)
+
+        try:
+            smtp_conn.send_message(msg)
+            sent += 1
+        except Exception as e:
+            failed.append(f"{emp}: {e}")
+
+    smtp_conn.quit()
+    return sent, failed
+
+
 # Hydrate views
-users_df, sched_df, avail_df, trade_df, status_df = load_all_data()
+users_df, sched_df, avail_df, trade_df, status_df, messages_df, trade_comments_df = load_all_data()
 
 
 def normalize_pin(raw_pin):
@@ -283,13 +397,15 @@ else:
     # --- SERVER PORTAL ---
     if app_mode == "Server Portal":
         u = st.session_state.user_profile
-        tab1, tab2, tab3 = st.tabs(["Schedule View", "Request Time Off", "Shift Trade Board"])
+        tab1, tab_directory, tab_messages, tab2, tab3 = st.tabs(
+            ["Schedule View", "Team Directory", "Message Board", "Request Time Off", "Shift Trade Board"]
+        )
 
         with tab1:
             if not week_is_live and not st.session_state.is_manager:
                 st.info("The manager hasn't published this schedule yet.")
             else:
-                view_mode = st.radio("Display Filter:", ["Show Full Team Floor Plan", "Show Just My Personal Schedule"], horizontal=True)
+                view_mode = st.radio("Display Filter:", ["Show Just My Personal Schedule", "Show Full Team Floor Plan"], horizontal=True)
 
                 if view_mode == "Show Just My Personal Schedule":
                     st.write("### Your Shifts for the Week")
@@ -311,6 +427,11 @@ else:
                                         st.rerun()
                                 else:
                                     st.caption("Listed on Trade Board")
+                                    my_trade = next((t for t in up_for_grabs if t['employee'] == u and t['day'] == d_day), None)
+                                    if my_trade and st.button("Cancel Drop", key=f"p_cancel_{d_day}"):
+                                        remove_trade_row(my_trade["id"])
+                                        st.toast("Drop cancelled — shift is back on your schedule.")
+                                        st.rerun()
                             else:
                                 st.markdown("<p style='color:gray; font-size:13px;'>Off</p>", unsafe_allow_html=True)
                 else:
@@ -360,11 +481,48 @@ else:
                                         st.rerun()
                                 else:
                                     st.warning("Shift drop pending...")
+                                    my_trade = next((t for t in up_for_grabs if t['employee'] == s['emp'] and t['day'] == view_day), None)
+                                    if my_trade and st.button("Cancel Drop", key=f"inline_cancel_{venue_name}_{s['role']}_{s['emp']}"):
+                                        remove_trade_row(my_trade["id"])
+                                        st.toast("Drop cancelled — shift is back on your schedule.")
+                                        st.rerun()
 
                     with col_eh:
                         render_roster_column("Essen Haus", "🏰", day_shifts)
                     with col_cbi:
                         render_roster_column("CBI Side", "🌭", day_shifts)
+
+        with tab_directory:
+            st.subheader("Team Directory")
+            st.caption("Contact info for the whole crew.")
+            for emp in current_db_employees:
+                meta = employee_directory.get(emp, {})
+                with st.container(border=True):
+                    c1, c2 = st.columns([2, 3])
+                    c1.markdown(f"**{emp}**" + (" 👑" if meta.get("is_manager") else ""))
+                    contacts = []
+                    if meta.get("phone"):
+                        contacts.append(f"📞 [{meta['phone']}](tel:{meta['phone']})")
+                    if meta.get("email"):
+                        contacts.append(f"📧 [{meta['email']}](mailto:{meta['email']})")
+                    c2.markdown(" &nbsp;|&nbsp; ".join(contacts) if contacts else "_No contact info on file_")
+
+        with tab_messages:
+            st.subheader("Team Message Board")
+            with st.form("new_message_form", clear_on_submit=True):
+                msg_text = st.text_area("Post a message to the team:", height=80)
+                if st.form_submit_button("Post Message", type="primary"):
+                    if msg_text.strip():
+                        add_message(u, msg_text.strip())
+                        st.rerun()
+            st.divider()
+            if not messages_df.empty:
+                for _, m in messages_df.sort_values("id", ascending=False).iterrows():
+                    with st.container(border=True):
+                        st.markdown(f"**{m['employee']}** · _{m['timestamp']}_")
+                        st.write(m["message"])
+            else:
+                st.caption("No messages yet. Be the first to post!")
 
         with tab2:
             st.subheader("Submit Availability / Time-Off")
@@ -378,12 +536,14 @@ else:
                     if cols[i].checkbox(d[:3], key=f"perm_{d}"):
                         checked_days.append(d)
 
+                perm_window = st.radio("Which shift(s) on those days?", ["Morning", "Evening", "Full Day"], horizontal=True)
+
                 if st.button("Submit Request", type="primary"):
                     if not checked_days:
                         st.warning("Select at least one day.")
                     else:
                         for d in checked_days:
-                            add_availability_row(u, d, "Permanent Block", "")
+                            add_availability_row(u, d, f"Permanent Block: {perm_window}", "")
                         st.success("Availability saved!")
                         st.rerun()
 
@@ -400,13 +560,42 @@ else:
                     st.rerun()
 
         with tab3:
-            st.subheader("Available Trades Pool")
+            st.subheader("Shift Trade Board")
+
+            def render_trade_comments(trade_id):
+                comments = trade_comments_df[trade_comments_df["trade_id"] == trade_id] if not trade_comments_df.empty else pd.DataFrame()
+                for _, cm in comments.iterrows():
+                    st.caption(f"💬 **{cm['employee']}** ({cm['timestamp']}): {cm['comment']}")
+                cc1, cc2 = st.columns([4, 1])
+                new_comment = cc1.text_input("Add a comment", key=f"comment_{trade_id}", label_visibility="collapsed", placeholder="Add a comment...")
+                if cc2.button("Comment", key=f"comment_btn_{trade_id}"):
+                    if new_comment.strip():
+                        add_trade_comment(trade_id, u, new_comment.strip())
+                        st.rerun()
+
+            st.markdown("#### Your Posted Shifts")
+            my_trades = [t for t in up_for_grabs if t["employee"] == u]
+            if my_trades:
+                for t in my_trades:
+                    with st.container(border=True):
+                        st.write(f"You listed **{t['day']}**: `{t['details']}`")
+                        render_trade_comments(t["id"])
+                        if st.button("↩️ Cancel Drop (Keep My Shift)", key=f"cancel_{t['id']}", type="primary"):
+                            remove_trade_row(t["id"])
+                            st.toast("Drop cancelled — shift is back on your schedule.")
+                            st.rerun()
+            else:
+                st.caption("You haven't listed any shifts on the board.")
+
+            st.divider()
+            st.markdown("#### Available From Others")
             open_trades = [t for t in up_for_grabs if t["employee"] != u]
             if open_trades:
                 for t in open_trades:
                     with st.container(border=True):
                         c_text, c_act = st.columns([4, 1])
                         c_text.write(f"Employee: **{t['employee']}** wishes to drop **{t['day']}** | Context: `{t['details']}`")
+                        render_trade_comments(t["id"])
                         if c_act.button("Claim Shift", key=f"claim_{t['id']}", type="primary"):
                             match = sched_df[(sched_df["week_start"] == week_string) & (sched_df["employee"] == t["employee"]) & (sched_df["day"] == t["day"])]
                             if not match.empty:
@@ -422,9 +611,19 @@ else:
 
     # --- MANAGER HUB ---
     elif app_mode == "Manager Hub":
-        m_tab1, m_tab2 = st.tabs(["Roster Grid Engine", "Staff Directory"])
+        m_tab1, m_tab2, m_tab3 = st.tabs(["Roster Grid Engine", "Staff Directory", "Email Settings"])
         with m_tab1:
+            if "last_email_report" in st.session_state:
+                rep = st.session_state.last_email_report
+                with st.expander(f"📧 Last Email Send Report — {rep['sent']} sent, {len(rep['failed'])} failed", expanded=bool(rep["failed"])):
+                    if rep["failed"]:
+                        for f in rep["failed"]:
+                            st.error(f)
+                    else:
+                        st.success("All emails delivered successfully.")
+
             tool_c1, tool_c2, tool_c3 = st.columns([2, 2, 3])
+            notify_team = tool_c1.checkbox("📧 Email team on publish", value=True)
             if week_is_live:
                 tool_c2.markdown("<h3 style='color:#10b981; margin:0;'>Published</h3>", unsafe_allow_html=True)
                 if tool_c3.button("Unpublish Schedule"):
@@ -434,9 +633,18 @@ else:
                 tool_c2.markdown("<h3 style='color:#f59e0b; margin:0;'>Draft Mode</h3>", unsafe_allow_html=True)
                 if tool_c3.button("Publish Schedule to Team", type="primary"):
                     set_week_status(week_string, 1)
+                    if notify_team:
+                        sent, fail_list = send_schedule_emails(week_string, schedule_matrix, employee_directory)
+                        st.session_state.last_email_report = {"sent": sent, "failed": fail_list}
+                        st.toast(f"Published! Emails: {sent} sent" + (f", {len(fail_list)} failed." if fail_list else "."))
                     st.rerun()
 
             st.divider()
+            st.markdown(
+                "<div style='font-size:13px; color:gray;'>🟢 Scheduled &nbsp;|&nbsp; 🔴 Permanent Block &nbsp;|&nbsp; "
+                "🟠 Temp Conflict &nbsp;|&nbsp; 🔵 Drop Pending &nbsp;|&nbsp; ⚪ Open</div>",
+                unsafe_allow_html=True
+            )
             header_cols = st.columns([2.2] + [1.4] * 7 + [1.6])
             header_cols[0].write("**Employee**")
             for i, d in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
@@ -451,18 +659,26 @@ else:
                     s = schedule_matrix[emp][d]
                     has_request = availability_matrix.get(emp, {}).get(d)
                     is_dropped = any(t['employee'] == emp and t['day'] == d for t in up_for_grabs)
+                    btn_type = "secondary"
 
                     if has_request:
-                        label = "PERM\nBLOCK" if "Permanent" in has_request else f"Conflict: {has_request.replace('Temp: ', '')}"
+                        if "Permanent" in has_request:
+                            window = has_request.split(":")[-1].strip() if ":" in has_request else "Full Day"
+                            tag = {"Morning": "AM", "Evening": "PM"}.get(window, "ALL")
+                            label = f"🔴 PERM-{tag}"
+                        else:
+                            label = f"🟠 {has_request.replace('Temp: ', '')}"
                     elif s["type"] != "Off":
                         pfx = "EH" if s["location"] == "Essen Haus" else "CBI"
-                        label = f"[{pfx}] {s['role']}\nShift: {s['type']}"
+                        dot = "🔵" if is_dropped else "🟢"
+                        label = f"{dot} [{pfx}] {s['role']}\nShift: {s['type']}"
                         if is_dropped:
                             label += "\nDROP REQ"
+                        btn_type = "primary"
                     else:
-                        label = "+"
+                        label = "⚪ +"
 
-                    if row_cols[i + 1].button(label, key=f"m_{emp}_{d}"):
+                    if row_cols[i + 1].button(label, key=f"m_{emp}_{d}", type=btn_type):
                         st.session_state.sel = {"emp": emp, "day": d}
                         st.rerun()
                     tot_hours += s["hours"]
@@ -472,6 +688,9 @@ else:
                 e, d = st.session_state.sel["emp"], st.session_state.sel["day"]
                 st.divider()
                 st.subheader(f"Shift Editor: {e} on {d}")
+                conflict = availability_matrix.get(e, {}).get(d)
+                if conflict:
+                    st.warning(f"⚠️ {e} has a time-off request for {d}: **{conflict}**")
                 c1, c2, c3, c4 = st.columns(4)
                 loc_choice = c1.selectbox("Venue Location", ["Essen Haus", "CBI Side"])
                 r = c2.selectbox("Role", ["Server", "Bartender", "Host", "Expo", "CBI CL Server", "Manager"])
@@ -505,3 +724,25 @@ else:
                         add_new_employee(n, p, m, 20.00, ph, em)
                         st.success("Employee hired!")
                         st.rerun()
+
+        with m_tab3:
+            st.subheader("Email Notification Settings")
+            st.caption(
+                "Configure the outgoing email account used to send published schedules to the team. "
+                "For Gmail, use an App Password (not your normal password) generated at myaccount.google.com/apppasswords."
+            )
+            current_settings = get_settings()
+            with st.form("email_settings_form"):
+                s_server = st.text_input("SMTP Server", value=current_settings.get("smtp_server", "smtp.gmail.com"))
+                s_port = st.text_input("SMTP Port", value=current_settings.get("smtp_port", "587"))
+                s_user = st.text_input("Sender Email Address", value=current_settings.get("smtp_user", ""))
+                s_pass = st.text_input("Sender Password / App Password", value=current_settings.get("smtp_password", ""), type="password")
+                s_name = st.text_input("Display Name", value=current_settings.get("from_name", "Essen Haus Scheduling"))
+                if st.form_submit_button("Save Email Settings", type="primary"):
+                    save_setting("smtp_server", s_server.strip())
+                    save_setting("smtp_port", s_port.strip())
+                    save_setting("smtp_user", s_user.strip())
+                    save_setting("smtp_password", s_pass)
+                    save_setting("from_name", s_name.strip())
+                    st.success("Email settings saved.")
+                    st.rerun()
